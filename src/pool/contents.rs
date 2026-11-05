@@ -65,6 +65,8 @@ impl PoolContents {
         let min_connections = self.config.min_connections();
         self.num_being_created = if num_in_pool < min_connections {
             min_connections - num_in_pool
+        } else if self.pending_requests.is_empty() {
+            0
         } else {
             let max_connections = self.config.max_connections();
             let increment = self.config.connection_increment();
@@ -119,9 +121,12 @@ impl PoolContents {
     /// connection is added to the list of free connections.
     fn satisfy_request(&mut self, conn_impl_result: Result<ConnImpl, Error>) {
         if let Some(sender) = self.pending_requests.pop_front() {
+            let has_connection = conn_impl_result.is_ok();
             match sender.send(conn_impl_result) {
                 Ok(_) => {
-                    self.num_busy += 1;
+                    if has_connection {
+                        self.num_busy += 1;
+                    }
                 }
                 Err(e) => {
                     self.satisfy_request(e.0);
@@ -255,5 +260,46 @@ impl PoolContents {
             self.satisfy_requests();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_pool_does_not_grow() {
+        let (tx, rx) = mpsc::channel();
+        let config = PoolConfig::default()
+            .set_min_connections(0)
+            .set_max_connections(4);
+        let mut contents = PoolContents::new(config, tx);
+        contents.notify_manager();
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(contents.num_being_created, 0);
+    }
+
+    #[test]
+    fn failed_acquisitions_preserve_capacity_and_allow_close() {
+        let (tx, rx) = mpsc::channel();
+        let config = PoolConfig::default()
+            .set_min_connections(0)
+            .set_max_connections(1);
+        let mut contents = PoolContents::new(config, tx);
+
+        for _ in 0..2 {
+            let PoolAcquireResponse::Wait(result) = contents.acquire() else {
+                panic!("expected a connection request");
+            };
+            assert!(matches!(rx.try_recv(), Ok(PoolManagerRequest::GrowPool)));
+            contents.add_new_connection(Err(Error::not_connected()));
+            assert!(result.try_recv().unwrap().is_err());
+            assert_eq!(contents.busy_count(), 0);
+            assert_eq!(contents.open_count(), 0);
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+
+        contents.close().unwrap();
+        assert!(matches!(rx.try_recv(), Ok(PoolManagerRequest::ClosePool)));
     }
 }
