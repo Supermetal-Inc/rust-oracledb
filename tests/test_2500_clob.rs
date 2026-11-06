@@ -332,3 +332,44 @@ fn test_2516_unicode_streaming(
     assert_eq!(output, text);
     Ok(())
 }
+
+#[rstest]
+fn test_2517_inline_empty_and_null(
+    conn: oracledb::Connection,
+) -> Result<(), oracledb::Error> {
+    let _table = common::create_table(
+        &conn,
+        "test_2517",
+        "id number, c clob, n nclob, b blob",
+    )?;
+    conn.execute("insert into test_2517 values (1, null, null, null)", &[])?;
+    conn.execute("insert into test_2517 values (2, empty_clob(), empty_clob(), empty_blob())", &[])?;
+    conn.execute("insert into test_2517 values (3, to_clob('😀中'), to_nclob('😀中'), hextoraw('0102'))", &[])?;
+    for _ in 0..2 {
+        let mut rows = conn
+            .statement("select c, n, b from test_2517 order by id")?
+            .fetch_array_size(1)
+            .build()?
+            .query(&[])?;
+        let row = rows.next().unwrap()?;
+        assert_eq!(row.get::<Option<String>>(0)?, None);
+        assert_eq!(row.get::<Option<String>>(1)?, None);
+        assert_eq!(row.get::<Option<Vec<u8>>>(2)?, None);
+        let row = rows.next().unwrap()?;
+        assert_eq!(row.get::<Option<String>>(0)?, Some(String::new()));
+        assert_eq!(row.get::<Option<String>>(1)?, Some(String::new()));
+        assert_eq!(row.get::<Option<Vec<u8>>>(2)?, Some(Vec::new()));
+        let row = rows.next().unwrap()?;
+        assert_eq!(row.get::<String>(0)?, "😀中");
+        assert_eq!(row.get::<String>(1)?, "😀中");
+        assert_eq!(row.get::<Vec<u8>>(2)?, vec![1, 2]);
+        assert!(rows.next().is_none());
+    }
+    let row = conn.query_row(
+        "select v, v from (select to_clob(:1) v from dual)",
+        &[&"😀中"],
+    )?;
+    assert_eq!(row.get::<String>(0)?, "😀中");
+    assert_eq!(row.get::<String>(1)?, "😀中");
+    Ok(())
+}

@@ -98,6 +98,37 @@ impl PendingLobData {
         }
     }
 
+    /// Materializes a locator without relocking the client during row completion.
+    pub(crate) fn into_inline_value(
+        self,
+        client: &mut crate::client::Client,
+    ) -> Result<crate::db_value::DbValue, Error> {
+        let result = (|| {
+            let size = self.size.unwrap();
+            let bytes = if size == 0 {
+                Vec::new()
+            } else {
+                let mut message = LobOpMessage::new(
+                    &self.locator,
+                    LobOp::Read(1, size as u64),
+                );
+                client.process_lob_op(&mut message)?;
+                message.take_data()
+            };
+            if self.db_type == crate::DB_TYPE_BLOB {
+                Ok(crate::db_value::DbValue::Bytes(bytes))
+            } else {
+                let encoding =
+                    Lob::locator_string_encoding(self.db_type, &self.locator);
+                Ok(crate::db_value::DbValue::String(Lob::decode_string(
+                    &bytes, encoding,
+                )?))
+            }
+        })();
+        client.add_lob_to_close(self.locator);
+        result
+    }
+
     /// Returns the locator.
     pub(crate) fn take_locator(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.locator)

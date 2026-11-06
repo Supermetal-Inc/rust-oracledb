@@ -356,7 +356,7 @@ impl Response {
     /// Finalizes pending objects, LOBs and cursors after type discovery.
     fn finalize_rows(
         &mut self,
-        client: &Client,
+        client: &mut Client,
         client_ref: &ClientRef,
         metadata: &[Metadata],
     ) -> Result<(), Error> {
@@ -373,13 +373,18 @@ impl Response {
             for row in self.rows.as_mut().unwrap() {
                 for column_num in &column_nums {
                     if let Some(data) = values.next().unwrap() {
-                        row.finalize_column(
+                        if let Err(error) = row.finalize_column(
                             *column_num,
                             client,
                             client_ref,
                             data,
                             &metadata[*column_num],
-                        )?;
+                        ) {
+                            for pending in values.flatten() {
+                                pending.cleanup(client);
+                            }
+                            return Err(error);
+                        }
                     }
                 }
             }

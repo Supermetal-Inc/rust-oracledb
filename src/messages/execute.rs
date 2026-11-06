@@ -83,7 +83,7 @@ impl ExecuteMessage<'_, '_> {
 
     fn write_define_metadata(&self, client: &Client, buf: &mut WriteBuffer) {
         for metadata in self.statement.out_metadata() {
-            metadata.write_to_buf(buf, client);
+            metadata.write_define_to_buf(buf, client);
         }
     }
 

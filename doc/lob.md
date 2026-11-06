@@ -62,7 +62,9 @@ LOB.
 You can use LOB locators when you want to stream data, inspect LOB metadata,
 or modify an existing persistent LOB. Using `fetch_lobs()`, you can enable
 locator fetching. Without `fetch_lobs()`, CLOB/NCLOB values are fetched
-directly as `String`, and BLOB values are fetched directly as `Vec<u8>`.
+as `String`, and BLOB values are fetched as `Vec<u8>`. The driver reads these
+values through locators so that empty LOBs remain distinct from SQL NULL.
+Each nonempty LOB requires an additional read round trip.
 
 Consider the following table:
 

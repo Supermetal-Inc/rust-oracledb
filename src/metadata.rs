@@ -57,6 +57,7 @@ enum MetadataObjectType {
 pub struct Metadata {
     name: String,
     db_type: &'static DbType,
+    lob_fetch_type: Option<&'static DbType>,
     null_by_describe: bool,
     nullable: bool,
     precision: u8,
@@ -102,6 +103,7 @@ impl Metadata {
             object_type: None,
             domain: None,
             annotations: Vec::new(),
+            lob_fetch_type: None,
         }
     }
 
@@ -110,6 +112,12 @@ impl Metadata {
     pub(crate) fn define_metadata(&self) -> Metadata {
         let mut metadata = self.clone();
         metadata.max_size = 0;
+        if matches!(
+            self.db_type.ora_type_num,
+            constants::ORA_TYPE_NUM_CLOB | constants::ORA_TYPE_NUM_BLOB
+        ) {
+            metadata.lob_fetch_type = Some(self.db_type);
+        }
         metadata.db_type = match self.db_type {
             crate::DB_TYPE_BLOB => crate::DB_TYPE_LONG_RAW,
             crate::DB_TYPE_CLOB => crate::DB_TYPE_LONG,
@@ -117,6 +125,26 @@ impl Metadata {
             _ => metadata.db_type,
         };
         metadata
+    }
+
+    pub(crate) fn lob_fetch_type(&self) -> Option<&'static DbType> {
+        self.lob_fetch_type
+    }
+
+    /// Requests locators when materializing LOBs, retaining the distinction
+    /// between empty LOBs and NULL lost by server-side LONG conversion.
+    pub(crate) fn write_define_to_buf(
+        &self,
+        buf: &mut WriteBuffer,
+        client: &Client,
+    ) {
+        if let Some(db_type) = self.lob_fetch_type {
+            let mut metadata = self.clone();
+            metadata.db_type = db_type;
+            metadata.write_to_buf(buf, client);
+        } else {
+            self.write_to_buf(buf, client);
+        }
     }
 
     /// Returns a new structure from the metadata returned by the database.
@@ -139,6 +167,7 @@ impl Metadata {
             object_type: None,
             domain: None,
             annotations: Vec::new(),
+            lob_fetch_type: None,
         };
         let ora_type_num: u16 = resp.read_u8()?.into();
         resp.read_u8()?; // flags
@@ -325,7 +354,7 @@ impl Metadata {
     pub(crate) fn should_defer_value(&self) -> bool {
         !self.null_by_describe
             && matches!(
-                self.db_type.ora_type_num,
+                self.lob_fetch_type.unwrap_or(self.db_type).ora_type_num,
                 constants::ORA_TYPE_NUM_CLOB
                     | constants::ORA_TYPE_NUM_BLOB
                     | constants::ORA_TYPE_NUM_BFILE

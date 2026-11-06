@@ -99,7 +99,7 @@ impl PendingDbValue {
     /// Converts pending data into a public value with a client reference.
     pub(crate) fn try_into_db_value(
         self,
-        client: &Client,
+        client: &mut Client,
         client_ref: &ClientRef,
         metadata: &Metadata,
     ) -> Result<DbValue, Error> {
@@ -119,7 +119,11 @@ impl PendingDbValue {
                 Cursor::new(Statement::new(client_ref.clone(), statement)),
             ))),
             Self::Lob(data) => {
-                Ok(DbValue::Lob(Lob::new(client_ref.clone(), data)))
+                if metadata.lob_fetch_type().is_some() {
+                    data.into_inline_value(client)
+                } else {
+                    Ok(DbValue::Lob(Lob::new(client_ref.clone(), data)))
+                }
             }
         }
     }
@@ -301,7 +305,7 @@ impl DbValue {
                 resp,
                 client,
                 statement,
-                metadata.db_type(),
+                metadata.lob_fetch_type().unwrap_or(metadata.db_type()),
                 in_fetch,
             )
         }

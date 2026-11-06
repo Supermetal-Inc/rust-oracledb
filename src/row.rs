@@ -85,7 +85,7 @@ impl DbRow {
     pub(crate) fn finalize_column(
         &mut self,
         index: usize,
-        client: &Client,
+        client: &mut Client,
         client_ref: &ClientRef,
         value: PendingDbValue,
         metadata: &Metadata,
