@@ -80,6 +80,10 @@ impl PoolContents {
     /// returned.
     fn get_connection(&mut self) -> Option<ConnImpl> {
         while let Some(conn_impl) = self.free_connections.pop_front() {
+            if conn_impl.lifetime_exceeded(self.config.max_lifetime()) {
+                self.connections_requiring_drop.push(conn_impl);
+                continue;
+            }
             match conn_impl.get_status(self.config.ping_interval()) {
                 ConnImplStatus::RequiresClose => {
                     self.connections_requiring_drop.push(conn_impl);
@@ -96,25 +100,27 @@ impl PoolContents {
     }
 
     /// Notify the manager that some work needs to be done. If a connection
-    /// requires a ping before it can be returned, that message is sent. If
-    /// no connections require a ping but there is room in the pool to grow,
-    /// that message is sent. If neither of these actions are possible but a
-    /// connection needs to be dropped that message is sent.
-    fn notify_manager(&mut self) {
-        if let Some(conn_impl) = self.connections_requiring_ping.pop_front() {
+    /// requires closing, close it before creating a replacement so retired
+    /// sessions do not consume the server's connection budget. Otherwise,
+    /// ping reusable connections before growing the pool.
+    pub(super) fn notify_manager(&mut self) {
+        if let Some(conn_impl) = self.connections_requiring_drop.pop() {
+            self.send_manager_request(PoolManagerRequest::DropConnection(
+                conn_impl,
+            ));
+        } else if let Some(conn_impl) =
+            self.connections_requiring_ping.pop_front()
+        {
             self.num_being_pinged += 1;
             self.send_manager_request(PoolManagerRequest::PingConnection(
                 conn_impl,
             ));
         } else if self.num_being_created == 0
-            && !self.pending_requests.is_empty()
+            && (!self.pending_requests.is_empty()
+                || self.open_count() < self.config.min_connections())
             && self.can_pool_grow()
         {
             self.send_manager_request(PoolManagerRequest::GrowPool);
-        } else if let Some(conn_impl) = self.connections_requiring_drop.pop() {
-            self.send_manager_request(PoolManagerRequest::DropConnection(
-                conn_impl,
-            ));
         }
     }
 
@@ -166,6 +172,7 @@ impl PoolContents {
     pub(super) fn acquire(&mut self) -> PoolAcquireResponse {
         if let Some(conn_impl) = self.get_connection() {
             self.num_busy += 1;
+            self.notify_manager();
             return PoolAcquireResponse::Connection(Ok(conn_impl));
         }
         let (tx, rx) = mpsc::channel();
@@ -181,8 +188,13 @@ impl PoolContents {
         conn_impl_result: Result<ConnImpl, Error>,
     ) {
         self.num_being_created -= 1;
+        let successful = conn_impl_result.is_ok();
         self.satisfy_request(conn_impl_result);
-        self.notify_manager();
+        if self.num_being_created > 0 {
+            self.send_manager_request(PoolManagerRequest::GrowPool);
+        } else if successful || !self.pending_requests.is_empty() {
+            self.notify_manager();
+        }
     }
 
     /// Adds a pinged connection back to the pool. This is called by the
@@ -194,9 +206,36 @@ impl PoolContents {
     ) {
         self.num_being_pinged -= 1;
         if let Some(conn_impl) = conn_impl_opt {
-            self.satisfy_request(Ok(conn_impl));
+            if conn_impl.lifetime_exceeded(self.config.max_lifetime()) {
+                self.connections_requiring_drop.push(conn_impl);
+            } else {
+                self.satisfy_request(Ok(conn_impl));
+            }
         }
         self.notify_manager();
+    }
+
+    /// Removes expired idle connections. Closing happens outside the pool lock.
+    pub(super) fn retire_idle_connections(&mut self) -> Vec<ConnImpl> {
+        let mut retired = Vec::new();
+        for _ in 0..self.free_connections.len() {
+            let conn = self.free_connections.pop_front().unwrap();
+            let idle_expired = self.open_count()
+                >= self.config.min_connections()
+                && self
+                    .config
+                    .idle_timeout()
+                    .is_some_and(|limit| conn.idle_duration() >= limit);
+            if idle_expired
+                || conn.lifetime_exceeded(self.config.max_lifetime())
+            {
+                retired.push(conn);
+            } else {
+                self.free_connections.push_back(conn);
+            }
+        }
+        self.notify_manager();
+        retired
     }
 
     /// Returns the number of busy connections.
@@ -254,7 +293,9 @@ impl PoolContents {
     ) -> Result<(), Error> {
         let result = conn_impl.set_returned_to_pool();
         self.num_busy -= 1;
-        if result.is_err() {
+        if result.is_err()
+            || conn_impl.lifetime_exceeded(self.config.max_lifetime())
+        {
             self.connections_requiring_drop.push(conn_impl);
             self.notify_manager();
         } else {

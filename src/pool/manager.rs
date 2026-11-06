@@ -29,6 +29,7 @@
 //-----------------------------------------------------------------------------
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::config::PoolConfig;
 use crate::connection::ConnImpl;
@@ -80,7 +81,36 @@ impl PoolManager {
 
     /// Runs the manager (in a thread).
     pub(super) fn run(&mut self) {
-        for request in &self.receive_channel {
+        let lifecycle_enabled = self.config.idle_timeout().is_some()
+            || self.config.max_lifetime().is_some();
+        let interval = Duration::from_secs(1);
+        let mut next_maintenance = Instant::now() + interval;
+        loop {
+            if lifecycle_enabled && Instant::now() >= next_maintenance {
+                let retired = self
+                    .contents_ref
+                    .lock()
+                    .unwrap()
+                    .retire_idle_connections();
+                for mut conn in retired {
+                    let _ = conn.close();
+                }
+                next_maintenance = Instant::now() + interval;
+            }
+            let request = if lifecycle_enabled {
+                match self.receive_channel.recv_timeout(
+                    next_maintenance.saturating_duration_since(Instant::now()),
+                ) {
+                    Ok(request) => request,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                }
+            } else {
+                match self.receive_channel.recv() {
+                    Ok(request) => request,
+                    Err(_) => break,
+                }
+            };
             match request {
                 PoolManagerRequest::GrowPool => {
                     self.grow_pool();
@@ -90,6 +120,7 @@ impl PoolManager {
                 }
                 PoolManagerRequest::DropConnection(mut conn_impl) => {
                     let _ = conn_impl.close();
+                    self.contents_ref.lock().unwrap().notify_manager();
                 }
                 PoolManagerRequest::PingConnection(conn_impl) => {
                     let result = self.ping_connection(conn_impl).ok();

@@ -55,6 +55,7 @@ pub(crate) struct ConnImpl {
     client_ref: ClientRef,
     db_info: DbInfo,
     returned_to_pool: Instant,
+    created_at: Instant,
 }
 
 pub(crate) enum ConnImplStatus {
@@ -94,7 +95,12 @@ impl ConnImpl {
         let mut client = Client::new(config, pool_id);
         let db_info = client.connect()?;
         let client_ref = std::sync::Arc::new(std::sync::Mutex::new(client));
-        Ok(ConnImpl { client_ref, db_info, returned_to_pool: Instant::now() })
+        Ok(ConnImpl {
+            client_ref,
+            db_info,
+            returned_to_pool: Instant::now(),
+            created_at: Instant::now(),
+        })
     }
 
     /// Creates an empty temporary BLOB, CLOB, or NCLOB.
@@ -103,6 +109,14 @@ impl ConnImpl {
         db_type: &'static DbType,
     ) -> Result<Lob, Error> {
         Lob::create_temp(self.client_ref.clone(), db_type)
+    }
+
+    pub(crate) fn idle_duration(&self) -> Duration {
+        self.returned_to_pool.elapsed()
+    }
+
+    pub(crate) fn lifetime_exceeded(&self, maximum: Option<Duration>) -> bool {
+        maximum.is_some_and(|maximum| self.created_at.elapsed() >= maximum)
     }
 
     /// Returns the current status of the connection.
