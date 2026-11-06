@@ -770,6 +770,14 @@ impl Client {
         params: BindParameters,
         parse_only: bool,
     ) -> Result<Response, Error> {
+        // A changed bind type can change SELECT output metadata. Reparse the
+        // cached cursor so its decoder matches the newly bound types.
+        if statement.is_query()
+            && statement.has_cursor()
+            && statement.binds_changed()
+        {
+            self.close_cursor(statement);
+        }
         if params.num_rows() > 1 && statement.requires_single_execute() {
             let mut initial_resp = self.execute(
                 statement,

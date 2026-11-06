@@ -613,6 +613,67 @@ pub trait ToDbValue: ToBuf + Send + Sync {
     }
 }
 
+/// An input value with an explicitly selected SQL type.
+///
+/// Character types, raw types and date/timestamp types can be selected within
+/// their respective families. Incompatible encodings are rejected.
+///
+/// ```rust
+/// let value = oracledb::TypedValue::new("你好", oracledb::DB_TYPE_NVARCHAR)?;
+/// # Ok::<(), oracledb::Error>(())
+/// ```
+pub struct TypedValue<T> {
+    value: T,
+    db_type: &'static DbType,
+}
+
+impl<T: ToDbValue> TypedValue<T> {
+    /// Selects a SQL type, rejecting incompatible wire encodings.
+    pub fn new(value: T, db_type: &'static DbType) -> Result<Self, Error> {
+        let source = value.db_type();
+        let compatible = |typ: &DbType| match typ.ora_type_num {
+            constants::ORA_TYPE_NUM_CHAR
+            | constants::ORA_TYPE_NUM_VARCHAR
+            | constants::ORA_TYPE_NUM_LONG => 1,
+            constants::ORA_TYPE_NUM_RAW | constants::ORA_TYPE_NUM_LONG_RAW => {
+                2
+            }
+            constants::ORA_TYPE_NUM_DATE
+            | constants::ORA_TYPE_NUM_TIMESTAMP
+            | constants::ORA_TYPE_NUM_TIMESTAMP_TZ
+            | constants::ORA_TYPE_NUM_TIMESTAMP_LTZ => 3,
+            _ => 0,
+        };
+        if source != db_type
+            && (compatible(source) == 0
+                || compatible(source) != compatible(db_type))
+        {
+            return Err(Error::different_types(source, db_type));
+        }
+        Ok(Self { value, db_type })
+    }
+}
+
+impl<T: ToDbValue> ToDbValue for TypedValue<T> {
+    fn db_type(&self) -> &'static DbType {
+        self.db_type
+    }
+    fn max_size(&self) -> usize {
+        self.value.max_size()
+    }
+}
+
+impl<T: ToDbValue> ToBuf for TypedValue<T> {
+    fn to_buf(
+        &self,
+        buf: &mut WriteBuffer,
+        db_type: &'static DbType,
+        write_length: bool,
+    ) {
+        self.value.to_buf(buf, db_type, write_length);
+    }
+}
+
 impl ToDbValue for String {
     fn db_type(&self) -> &'static DbType {
         crate::DB_TYPE_VARCHAR

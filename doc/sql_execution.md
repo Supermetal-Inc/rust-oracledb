@@ -550,3 +550,16 @@ println!("{}", oracledb::is_qualified_sql_name("HR.Orders-2026")) // false (cont
 
 [specialty statements]: https://www.oracle.com/pls/topic/lookup?ctx=dblatest&id=GUID-E1749EF5-2264-44DF-99EF-AEBEB943BED6
 [freesql]: https://freesql.com/
+
+### Explicit input types
+
+Use `TypedValue` to select a compatible character, raw, or timestamp type:
+
+```rust
+let value = oracledb::TypedValue::new("你好", oracledb::DB_TYPE_NVARCHAR)?;
+let row = connection.query_row("select :1 from dual", &[&value])?;
+```
+
+National-character binds use UTF-16. `TypedValue::new(None::<String>,
+DB_TYPE_NVARCHAR)` sends a typed NULL. Incompatible type families are rejected;
+changing a cached query's bind type reparses its cursor to refresh result metadata.

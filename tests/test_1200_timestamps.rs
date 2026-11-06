@@ -250,3 +250,20 @@ fn test_1210(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     assert_eq!(timestamp, fetched_timestamp);
     Ok(())
 }
+
+#[rstest]
+fn explicit_date_bind(
+    conn: oracledb::Connection,
+) -> Result<(), oracledb::Error> {
+    let timestamp = oracledb::OracleTimestamp::new_timestamp(
+        2024, 2, 3, 17, 0, 0, 123456789,
+    );
+    let value = oracledb::TypedValue::new(timestamp, oracledb::DB_TYPE_DATE)?;
+    let row = conn.query_row("select :1 from dual", &[&value])?;
+    assert_eq!(row.columns()[0].db_type(), oracledb::DB_TYPE_DATE);
+    assert_eq!(
+        row.get::<oracledb::OracleTimestamp>(0)?.to_string(),
+        "2024-02-03T17:00:00"
+    );
+    Ok(())
+}

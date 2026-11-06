@@ -276,3 +276,23 @@ fn test_1012(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     }
     Ok(())
 }
+
+#[rstest]
+fn explicit_national_character_bind(
+    conn: oracledb::Connection,
+) -> Result<(), oracledb::Error> {
+    for db_type in [oracledb::DB_TYPE_NCHAR, oracledb::DB_TYPE_NVARCHAR] {
+        let value = oracledb::TypedValue::new("你好😀", db_type)?;
+        let row = conn.query_row("select :1 from dual", &[&value])?;
+        assert_eq!(row.columns()[0].db_type(), db_type);
+        assert_eq!(row.get::<String>(0)?.trim_end(), "你好😀");
+        let null = oracledb::TypedValue::new(None::<String>, db_type)?;
+        let row = conn.query_row("select :1 from dual", &[&null])?;
+        assert_eq!(row.columns()[0].db_type(), db_type);
+        assert_eq!(row.get::<Option<String>>(0)?, None);
+    }
+    assert!(
+        oracledb::TypedValue::new("text", oracledb::DB_TYPE_NUMBER).is_err()
+    );
+    Ok(())
+}

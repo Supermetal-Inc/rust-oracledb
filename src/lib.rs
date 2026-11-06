@@ -114,6 +114,7 @@ pub use crate::utils::is_simple_sql_name;
 pub use crate::column_index::ColumnIndex;
 pub use crate::db_value::FromDbValue;
 pub use crate::db_value::ToDbValue;
+pub use crate::db_value::TypedValue;
 
 // Oracle specific types
 pub use crate::ora_type::OracleIntervalDS;
