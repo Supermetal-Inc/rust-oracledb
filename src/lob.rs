@@ -134,7 +134,7 @@ impl Lob {
 
     /// Converts a driver error into an I/O error for trait implementations.
     fn io_error(error: Error) -> io::Error {
-        io::Error::other(error.to_string())
+        io::Error::other(error)
     }
 
     /// Returns whether this LOB is a BFILE.
@@ -452,4 +452,17 @@ enum LobStringEncoding {
     Utf16Be,
     /// Little-endian UTF-16 character data.
     Utf16Le,
+}
+
+#[cfg(test)]
+mod error_regression {
+    use super::*;
+
+    #[test]
+    fn lob_io_error_preserves_driver_error() {
+        let error = Lob::io_error(Error::dead_connection());
+        let driver_error =
+            error.get_ref().unwrap().downcast_ref::<Error>().unwrap();
+        assert_eq!(driver_error.kind(), &crate::ErrorKind::DeadConnection);
+    }
 }
