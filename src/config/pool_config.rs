@@ -45,6 +45,8 @@ pub struct PoolConfig {
     connection_increment: Option<usize>,
     ping_interval: Option<Duration>,
     ping_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+    max_lifetime: Option<Duration>,
     pool_id: String,
 }
 
@@ -77,6 +79,12 @@ impl PoolConfig {
             && self.max_connections() != self.min_connections()
         {
             Err(Error::pool_increment_zero())
+        } else if self.idle_timeout.is_some_and(|value| value.is_zero())
+            || self.max_lifetime.is_some_and(|value| value.is_zero())
+        {
+            Err(Error::out_of_range(
+                "pool lifecycle durations must be positive",
+            ))
         } else {
             self.connection_config.validate()
         }
@@ -148,6 +156,30 @@ impl PoolConfig {
     /// ping before the connection is discarded.
     pub fn ping_timeout(&self) -> Duration {
         self.ping_timeout.unwrap_or(Duration::from_secs(5))
+    }
+
+    /// Returns the idle timeout for connections above the minimum. None disables it.
+    pub fn idle_timeout(&self) -> Option<Duration> {
+        self.idle_timeout
+    }
+
+    /// Returns the maximum connection lifetime. None disables it.
+    pub fn max_lifetime(&self) -> Option<Duration> {
+        self.max_lifetime
+    }
+
+    /// Retires excess idle connections after this duration (checked once per second).
+    /// None disables retirement; durations must be positive.
+    pub fn set_idle_timeout(mut self, value: Option<Duration>) -> Self {
+        self.idle_timeout = value;
+        self
+    }
+
+    /// Retires old connections when idle or returned, never while checked out.
+    /// None disables retirement; durations must be positive.
+    pub fn set_max_lifetime(mut self, value: Option<Duration>) -> Self {
+        self.max_lifetime = value;
+        self
     }
 
     /// Returns the program in use by the configuration. The default value is
@@ -334,6 +366,8 @@ impl Default for PoolConfig {
             connection_increment: None,
             ping_interval: Some(Duration::from_secs(60)),
             ping_timeout: None,
+            idle_timeout: None,
+            max_lifetime: None,
             pool_id: String::new(),
         }
     }

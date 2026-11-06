@@ -37,6 +37,8 @@ fn test_3000() {
     assert_eq!(config.connection_increment(), 1);
     assert_eq!(config.ping_interval(), Some(Duration::from_secs(60)));
     assert_eq!(config.ping_timeout(), Duration::from_secs(5));
+    assert_eq!(config.idle_timeout(), None);
+    assert_eq!(config.max_lifetime(), None);
     assert_eq!(config.stmtcachesize(), 20);
 
     let config = oracledb::PoolConfig::default()
@@ -81,4 +83,15 @@ fn test_3001() {
     )
     .unwrap_err();
     assert!(matches!(error.kind(), oracledb::ErrorKind::PoolIncrementZero));
+}
+
+#[test]
+fn lifecycle_durations_must_be_positive() {
+    for config in [
+        oracledb::PoolConfig::default().set_idle_timeout(Some(Duration::ZERO)),
+        oracledb::PoolConfig::default().set_max_lifetime(Some(Duration::ZERO)),
+    ] {
+        let error = oracledb::create_pool(config).unwrap_err();
+        assert!(matches!(error.kind(), oracledb::ErrorKind::OutOfRange(_)));
+    }
 }

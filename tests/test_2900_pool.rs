@@ -194,3 +194,64 @@ fn test_2907() -> Result<(), oracledb::Error> {
     pool.close()?;
     Ok(())
 }
+
+#[test]
+fn idle_timeout_preserves_minimum() -> Result<(), oracledb::Error> {
+    use std::time::{Duration, Instant};
+    let mut pool = oracledb::create_pool(
+        pool_config(1, 3, 1)?
+            .set_idle_timeout(Some(Duration::from_millis(100))),
+    )?;
+    let connections = [pool.acquire()?, pool.acquire()?, pool.acquire()?];
+    assert_eq!(pool.open_count()?, 3);
+    drop(connections);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pool.open_count()? > 1 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(pool.open_count()?, 1);
+    pool.close()?;
+    Ok(())
+}
+
+#[test]
+fn lifetime_never_interrupts_checked_out_connection()
+-> Result<(), oracledb::Error> {
+    use std::time::{Duration, Instant};
+    let mut pool = oracledb::create_pool(
+        pool_config(1, 1, 1)?
+            .set_max_lifetime(Some(Duration::from_millis(200))),
+    )?;
+    let conn = pool.acquire()?;
+    let original = (conn.session_id()?, conn.serial_num()?);
+    std::thread::sleep(Duration::from_millis(300));
+    conn.ping()?;
+    assert_eq!(pool.busy_count()?, 1);
+    drop(conn);
+    let conn = pool.acquire()?;
+    let replacement = (conn.session_id()?, conn.serial_num()?);
+    assert_ne!(original, replacement);
+    drop(conn);
+    std::thread::sleep(Duration::from_millis(1200));
+    let conn = pool.acquire()?;
+    assert_ne!(replacement, (conn.session_id()?, conn.serial_num()?));
+    drop(conn);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pool.open_count()? != 1 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(pool.open_count()?, 1);
+    pool.close()?;
+    Ok(())
+}
+
+#[test]
+fn initial_minimum_and_increment_create_all_scheduled_connections()
+-> Result<(), oracledb::Error> {
+    let mut pool = oracledb::create_pool(pool_config(3, 3, 1)?)?;
+    let connections = [pool.acquire()?, pool.acquire()?, pool.acquire()?];
+    assert_eq!(pool.open_count()?, 3);
+    drop(connections);
+    pool.close()?;
+    Ok(())
+}

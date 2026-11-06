@@ -1115,3 +1115,11 @@ location in the
 [use-static-pools]: https://www.oracle.com/pls/topic/lookup?ctx=dblatest&id=GUID-7DFBA826-7CC0-4D16-B19C-31D168069B54
 [v$session-connect-info]: https://www.oracle.com/pls/topic/lookup?ctx=dblatest&id=GUID-9F0DCAEA-A67E-4183-89E7-B1555DC591CE
 [client access through a proxy]: https://www.oracle.com/pls/topic/lookup?ctx=dblatest&id=GUID-D77D0D4A-7483-423A-9767-CBB5854A15CC
+
+### Connection pool lifetime controls
+
+`PoolConfig::set_idle_timeout(Some(duration))` retires idle connections above
+`min_connections`. `set_max_lifetime(Some(duration))` retires old connections
+when idle or returned, and replenishes the minimum. Neither interrupts a
+checked-out connection. Both default to `None` (disabled); durations must be
+positive. The pool manager checks idle connections once per second.
