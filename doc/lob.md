@@ -102,6 +102,11 @@ This prints the following output:
 BLOB bytes: [10, 20, 30, 40, 255]
 ```
 
+Character LOB reads return UTF-8 bytes, including when a read buffer is smaller
+than one encoded character. The driver buffers the remainder and completes any
+surrogate pair split by an Oracle read. Consume buffered bytes before writing
+or trimming the same locator. Character writes still require complete UTF-8.
+
 ## <a name="bfile"></a> 9.3 Reading BFILEs
 
 A BFILE refers to a file on the database server through a DIRECTORY
