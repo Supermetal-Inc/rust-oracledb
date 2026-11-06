@@ -47,8 +47,8 @@ use std::io;
 ///
 /// Character LOB offsets and amounts use Oracle UCS-2 units, not UTF-8 bytes
 /// or Rust `char` counts. Supplemental characters use two Oracle units.
-/// Decoding to UTF-8 can expand the data, so reads need a large enough caller
-/// buffer and writes need complete UTF-8 in each call.
+/// Reads return UTF-8 bytes and support arbitrary buffer sizes. Writes need
+/// complete UTF-8 in each call.
 pub struct Lob {
     client_ref: ClientRef,
     locator: Vec<u8>,
@@ -56,6 +56,7 @@ pub struct Lob {
     size: Option<usize>,
     chunk_size: Option<usize>,
     offset: usize,
+    pending_read: io::Cursor<Vec<u8>>,
 }
 
 pub(crate) struct PendingLobData {
@@ -176,18 +177,29 @@ impl Lob {
 
     /// Determines the string encoding used by the current LOB locator.
     fn string_encoding(&self) -> LobStringEncoding {
-        if self.db_type.csfrm == constants::CS_FORM_NCHAR {
+        Self::locator_string_encoding(self.db_type, &self.locator)
+    }
+
+    fn locator_string_encoding(
+        db_type: &'static DbType,
+        locator: &[u8],
+    ) -> LobStringEncoding {
+        if db_type.csfrm == constants::CS_FORM_NCHAR {
             return LobStringEncoding::Utf16Be;
         }
-        let flags3 = self.locator[constants::TTC_LOB_LOC_OFFSET_FLAG_3];
+        let flags3 = locator[constants::TTC_LOB_LOC_OFFSET_FLAG_3];
         if flags3 & constants::TTC_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET != 0 {
-            let flags4 = self.locator[constants::TTC_LOB_LOC_OFFSET_FLAG_4];
+            let flags4 = locator[constants::TTC_LOB_LOC_OFFSET_FLAG_4];
             if flags4 & constants::TTC_LOB_LOC_FLAGS_LITTLE_ENDIAN != 0 {
                 return LobStringEncoding::Utf16Le;
             }
             return LobStringEncoding::Utf16Be;
         }
         LobStringEncoding::Utf8
+    }
+
+    fn has_pending_read(&self) -> bool {
+        self.pending_read.position() < self.pending_read.get_ref().len() as u64
     }
 
     /// Writes already-encoded data to the LOB at the specified Oracle offset.
@@ -233,6 +245,7 @@ impl Lob {
             size: Some(0),
             chunk_size: None,
             offset: 1,
+            pending_read: io::Cursor::new(Vec::new()),
         })
     }
 
@@ -245,6 +258,7 @@ impl Lob {
             size: data.size,
             chunk_size: data.chunk_size,
             offset: 1,
+            pending_read: io::Cursor::new(Vec::new()),
         }
     }
 
@@ -307,6 +321,13 @@ impl Lob {
 
     /// Trims the LOB to the new size.
     pub fn trim(&mut self, new_size: usize) -> Result<(), Error> {
+        if self.has_pending_read() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "consume buffered LOB bytes before trimming",
+            )
+            .into());
+        }
         if self.is_bfile() {
             return Err(Error::operation_not_supported_on_bfile());
         }
@@ -333,9 +354,9 @@ impl Drop for Lob {
 
 /// Reads LOB data as a forward-only byte stream.
 ///
-/// For CLOB/NCLOB data, Oracle offsets and amounts use UCS-2 units. If UTF-8
-/// expansion makes the decoded data larger than `buf`, `read()` returns
-/// `InvalidInput` without advancing the LOB offset.
+/// For CLOB/NCLOB data, Oracle offsets and amounts use UCS-2 units. Decoded
+/// UTF-8 bytes that do not fit in the caller's buffer are retained for the
+/// next read.
 impl io::Read for Lob {
     /// Reads bytes from the current LOB stream position into `buf`.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -343,6 +364,10 @@ impl io::Read for Lob {
             return Ok(0);
         }
 
+        let pending = self.pending_read.read(buf)?;
+        if pending > 0 {
+            return Ok(pending);
+        }
         let size = self.get_size().map_err(Self::io_error)?;
         if self.offset > size {
             return Ok(0);
@@ -353,7 +378,7 @@ impl io::Read for Lob {
         let amount = if is_character_lob {
             // Character LOB amounts are Oracle UCS-2 units. Allow up to 3
             // UTF-8 bytes per unit after decoding.
-            remaining.min((buf.len() / 3).max(1))
+            remaining.min((buf.len() / 3).max(2))
         } else {
             remaining.min(buf.len())
         };
@@ -363,7 +388,7 @@ impl io::Read for Lob {
         if explicitly_opened {
             self.open().map_err(Self::io_error)?;
         }
-        let bytes =
+        let mut bytes =
             self.read_at(self.offset, amount).map_err(Self::io_error)?;
         if explicitly_opened {
             self.close().map_err(Self::io_error)?;
@@ -373,12 +398,24 @@ impl io::Read for Lob {
             // Character LOBs are returned to callers as UTF-8, regardless of
             // the stored representation used by the locator.
             let encoding = self.string_encoding();
+            // Complete a surrogate pair cut by the requested UCS-2 amount.
+            let last_unit =
+                bytes.last_chunk::<2>().map(|unit| match encoding {
+                    LobStringEncoding::Utf16Be => u16::from_be_bytes(*unit),
+                    LobStringEncoding::Utf16Le => u16::from_le_bytes(*unit),
+                    LobStringEncoding::Utf8 => 0,
+                });
+            if last_unit.is_some_and(|unit| (0xd800..=0xdbff).contains(&unit))
+                && amount < remaining
+            {
+                bytes.extend(
+                    self.read_at(self.offset + amount, 1)
+                        .map_err(Self::io_error)?,
+                );
+            }
             let value =
                 Self::decode_string(&bytes, encoding).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        error.to_string(),
-                    )
+                    io::Error::new(io::ErrorKind::InvalidData, error)
                 })?;
             let amount = value.encode_utf16().count();
             (value.into_bytes(), amount)
@@ -387,15 +424,15 @@ impl io::Read for Lob {
             (bytes, amount)
         };
 
-        if data.len() > buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "buffer too small for LOB read",
-            ));
-        }
-        buf[..data.len()].copy_from_slice(&data);
         self.offset += offset_increment;
-        Ok(data.len())
+        if data.len() <= buf.len() {
+            buf[..data.len()].copy_from_slice(&data);
+            self.pending_read = io::Cursor::new(Vec::new());
+            Ok(data.len())
+        } else {
+            self.pending_read = io::Cursor::new(data);
+            self.pending_read.read(buf)
+        }
     }
 }
 
@@ -408,6 +445,12 @@ impl io::Write for Lob {
 
     /// Writes bytes at the current LOB stream position.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.has_pending_read() && !buf.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "consume buffered LOB bytes before writing",
+            ));
+        }
         if buf.is_empty() {
             return Ok(0);
         }

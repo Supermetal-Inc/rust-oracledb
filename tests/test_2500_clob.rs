@@ -206,8 +206,7 @@ fn test_2509(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
 }
 
 #[rstest]
-/// Validates that a CLOB read with an undersized byte buffer fails without
-/// consuming data, so the same UTF-8 character can be read successfully.
+/// A one-byte read may split the UTF-8 encoding of a character.
 fn test_2510(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     let mut row = conn
         .statement("select to_clob(:1) from dual")?
@@ -216,16 +215,14 @@ fn test_2510(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
         .query_row(&[&"é"])?;
     let mut lob: oracledb::Lob = row.take(0)?;
 
-    let mut small_buffer = [0_u8; 1];
-    let error = lob.read(&mut small_buffer).expect_err(
-        "a one-byte buffer cannot hold a two-byte UTF-8 character",
-    );
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-
-    let mut buffer = [0_u8; 2];
-    let bytes_read = lob.read(&mut buffer)?;
-    assert_eq!(bytes_read, 2);
-    assert_eq!(&buffer, "é".as_bytes());
+    let mut buffer = [0_u8; 1];
+    assert_eq!(lob.read(&mut buffer)?, 1);
+    assert_eq!(buffer[0], "é".as_bytes()[0]);
+    assert!(lob.write(b"x").is_err());
+    assert!(lob.trim(0).is_err());
+    assert_eq!(lob.get_size()?, 1);
+    assert_eq!(lob.read(&mut buffer)?, 1);
+    assert_eq!(buffer[0], "é".as_bytes()[1]);
     assert_eq!(lob.read(&mut buffer)?, 0);
     Ok(())
 }
@@ -295,5 +292,43 @@ fn test_2515(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     drop(lob);
     // The next query piggybacks the queued cleanup and confirms the LOB was freed.
     assert_eq!(common::temporary_lob_count(&conn)?, 0);
+    Ok(())
+}
+
+#[rstest]
+#[case("to_clob")]
+#[case("to_nclob")]
+fn test_2516_unicode_streaming(
+    conn: oracledb::Connection,
+    #[case] function: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let text = "😀中é".repeat(13);
+    for buffer_size in [1, 2, 9, 32] {
+        let mut row = conn
+            .statement(&format!("select {function}(:1) from dual"))?
+            .fetch_lobs()
+            .build()?
+            .query_row(&[&text])?;
+        let mut lob: oracledb::Lob = row.take(0)?;
+        let mut output = Vec::new();
+        let mut buffer = vec![0; buffer_size];
+        loop {
+            let size = lob.read(&mut buffer)?;
+            if size == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..size]);
+        }
+        assert_eq!(output, text.as_bytes());
+    }
+    let mut row = conn
+        .statement(&format!("select {function}(:1) from dual"))?
+        .fetch_lobs()
+        .build()?
+        .query_row(&[&text])?;
+    let mut lob: oracledb::Lob = row.take(0)?;
+    let mut output = String::new();
+    lob.read_to_string(&mut output)?;
+    assert_eq!(output, text);
     Ok(())
 }
