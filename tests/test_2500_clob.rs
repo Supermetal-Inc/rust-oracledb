@@ -28,9 +28,10 @@
 
 mod common;
 
+use common::admin_conn;
 use common::conn;
 use rstest::*;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 #[rstest]
 /// Validates reading a CLOB locator using 'Read::read_to_string()'.
@@ -206,7 +207,8 @@ fn test_2509(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
 }
 
 #[rstest]
-/// A one-byte read may split the UTF-8 encoding of a character.
+/// Validates that a CLOB read with an undersized byte buffer fails without
+/// consuming data, so the same UTF-8 character can be read successfully.
 fn test_2510(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     let mut row = conn
         .statement("select to_clob(:1) from dual")?
@@ -215,14 +217,16 @@ fn test_2510(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
         .query_row(&[&"é"])?;
     let mut lob: oracledb::Lob = row.take(0)?;
 
-    let mut buffer = [0_u8; 1];
-    assert_eq!(lob.read(&mut buffer)?, 1);
-    assert_eq!(buffer[0], "é".as_bytes()[0]);
-    assert!(lob.write(b"x").is_err());
-    assert!(lob.trim(0).is_err());
-    assert_eq!(lob.get_size()?, 1);
-    assert_eq!(lob.read(&mut buffer)?, 1);
-    assert_eq!(buffer[0], "é".as_bytes()[1]);
+    let mut small_buffer = [0_u8; 1];
+    let error = lob.read(&mut small_buffer).expect_err(
+        "a one-byte buffer cannot hold a two-byte UTF-8 character",
+    );
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+    let mut buffer = [0_u8; 2];
+    let bytes_read = lob.read(&mut buffer)?;
+    assert_eq!(bytes_read, 2);
+    assert_eq!(&buffer, "é".as_bytes());
     assert_eq!(lob.read(&mut buffer)?, 0);
     Ok(())
 }
@@ -278,7 +282,8 @@ fn test_2514(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     let lob = conn.create_lob(oracledb::DB_TYPE_CLOB)?;
     assert_eq!(common::temporary_lob_count(&conn)?, 1);
     drop(lob);
-    // The next query piggybacks the queued cleanup and confirms the LOB was freed.
+    // The next query piggybacks the queued cleanup and confirms the LOB was
+    // freed.
     assert_eq!(common::temporary_lob_count(&conn)?, 0);
     Ok(())
 }
@@ -290,15 +295,88 @@ fn test_2515(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
     let lob = conn.create_lob(oracledb::DB_TYPE_NCLOB)?;
     assert_eq!(common::temporary_lob_count(&conn)?, 1);
     drop(lob);
-    // The next query piggybacks the queued cleanup and confirms the LOB was freed.
+    // The next query piggybacks the queued cleanup and confirms the LOB was
+    // freed.
     assert_eq!(common::temporary_lob_count(&conn)?, 0);
+    Ok(())
+}
+
+#[rstest]
+/// Validates seeking into a LOB.
+fn test_2516(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let text = "test_2516 - Data".to_string();
+    let mut row = conn
+        .statement("select to_clob(:1) from dual")?
+        .fetch_lobs()
+        .build()?
+        .query_row(&[&text])?;
+    let mut lob: oracledb::Lob = row.take(0)?;
+    lob.seek(SeekFrom::Start(6))?;
+    let mut read_back = String::new();
+    lob.read_to_string(&mut read_back)?;
+    assert_eq!(read_back, &text[5..]);
+    lob.seek(SeekFrom::Start(8))?;
+    lob.seek(SeekFrom::Current(-4))?;
+    let mut read_back = String::new();
+    lob.read_to_string(&mut read_back)?;
+    assert_eq!(read_back, &text[3..]);
+    lob.seek(SeekFrom::End(-2))?;
+    let mut read_back = String::new();
+    lob.read_to_string(&mut read_back)?;
+    assert_eq!(read_back, &text[text.len() - 3..]);
+    Ok(())
+}
+
+#[rstest]
+/// Negative test cases for seeking into a LOB.
+fn test_2517(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let text = "test_2517 - Data".to_string();
+    let mut row = conn
+        .statement("select to_clob(:1) from dual")?
+        .fetch_lobs()
+        .build()?
+        .query_row(&[&text])?;
+    let mut lob: oracledb::Lob = row.take(0)?;
+    assert!(lob.seek(SeekFrom::Current(-5)).is_err());
+    assert!(lob.seek(SeekFrom::End(-100)).is_err());
+    lob.seek(SeekFrom::Start(u64::MAX))?;
+    assert!(lob.seek(SeekFrom::Current(1)).is_err());
+    lob.seek(SeekFrom::Start(i64::MAX as u64))?;
+    lob.seek(SeekFrom::Current(256))?;
+    assert!(lob.seek(SeekFrom::Current(i64::MAX)).is_err());
+    Ok(())
+}
+
+#[rstest]
+/// Tests that errors returned by LOB operations retain those details.
+fn test_2518(
+    admin_conn: oracledb::Connection,
+    conn: oracledb::Connection,
+) -> Result<(), oracledb::Error> {
+    let session_id = conn.session_id()?;
+    let serial_num = conn.serial_num()?;
+    let text = "test_2518 - Data".to_string();
+    let mut row = conn
+        .statement("select to_clob(:1) from dual")?
+        .fetch_lobs()
+        .build()?
+        .query_row(&[&text])?;
+    let mut lob: oracledb::Lob = row.take(0)?;
+    admin_conn.execute(
+        &format!("alter system kill session '{session_id},{serial_num}'"),
+        &[],
+    )?;
+    let io_error = lob.read_to_string(&mut String::new()).unwrap_err();
+    let error =
+        io_error.get_ref().unwrap().downcast_ref::<oracledb::Error>().unwrap();
+    assert_eq!(error.db_error_code(), Some(28));
     Ok(())
 }
 
 #[rstest]
 #[case("to_clob")]
 #[case("to_nclob")]
-fn test_2516_unicode_streaming(
+fn test_2519_unicode_streaming(
     conn: oracledb::Connection,
     #[case] function: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -330,5 +408,45 @@ fn test_2516_unicode_streaming(
     let mut output = String::new();
     lob.read_to_string(&mut output)?;
     assert_eq!(output, text);
+    Ok(())
+}
+
+#[rstest]
+#[case("to_clob")]
+#[case("to_nclob")]
+fn test_2520_seek_with_buffered_unicode(
+    conn: oracledb::Connection,
+    #[case] function: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let text = "😀中é";
+    let mut row = conn
+        .statement(&format!("select {function}(:1) from dual"))?
+        .fetch_lobs()
+        .build()?
+        .query_row(&[&text])?;
+    let mut lob: oracledb::Lob = row.take(0)?;
+    let mut byte = [0];
+    lob.read_exact(&mut byte)?;
+    assert_eq!(byte[0], text.as_bytes()[0]);
+    assert_eq!(
+        lob.seek(SeekFrom::Current(0)).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    // A failed seek must preserve the unread part of the character.
+    let mut rest = Vec::new();
+    lob.read_to_end(&mut rest)?;
+    assert_eq!(rest, &text.as_bytes()[1..]);
+    lob.seek(SeekFrom::Start(1))?;
+    lob.read_exact(&mut byte)?;
+    lob.seek(SeekFrom::Start(3))?;
+    let mut tail = String::new();
+    lob.read_to_string(&mut tail)?;
+    assert_eq!(tail, "中é");
+    lob.seek(SeekFrom::Start(1))?;
+    lob.read_exact(&mut byte)?;
+    lob.seek(SeekFrom::End(0))?;
+    tail.clear();
+    lob.read_to_string(&mut tail)?;
+    assert_eq!(tail, "é");
     Ok(())
 }

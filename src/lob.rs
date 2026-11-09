@@ -352,7 +352,7 @@ impl Drop for Lob {
     }
 }
 
-/// Reads LOB data as a forward-only byte stream.
+/// Reads LOB data as a byte stream.
 ///
 /// For CLOB/NCLOB data, Oracle offsets and amounts use UCS-2 units. Decoded
 /// UTF-8 bytes that do not fit in the caller's buffer are retained for the
@@ -436,6 +436,52 @@ impl io::Read for Lob {
     }
 }
 
+/// Helper for performing safe math on offsets.
+fn seek_offset_helper(initial_value: u64, offset: i64) -> io::Result<u64> {
+    if offset >= 0 {
+        initial_value.checked_add(offset as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek overflows u64 bounds",
+            )
+        })
+    } else {
+        let abs_offset = offset.unsigned_abs();
+        initial_value.checked_sub(abs_offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "seek drops below 0")
+        })
+    }
+}
+
+/// Adjusts the offset at which to read or write data. Note that LOBs require a
+/// one-based offset so zero is invalid and will be adjusted to one if
+/// requested. Absolute seeks discard buffered UTF-8 bytes. Relative seeks
+/// require those bytes to be consumed first because a partial UTF-8 character
+/// has no corresponding Oracle UCS-2 offset.
+impl io::Seek for Lob {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        let new_offset: u64 = match pos {
+            io::SeekFrom::Start(offset) => offset,
+            io::SeekFrom::Current(offset) => {
+                if self.has_pending_read() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "consume buffered LOB bytes before seeking relatively",
+                    ));
+                }
+                seek_offset_helper(self.offset as u64, offset)?
+            }
+            io::SeekFrom::End(offset) => {
+                let size = self.get_size().map_err(Self::io_error)?;
+                seek_offset_helper(size as u64, offset)?
+            }
+        };
+        self.offset = if new_offset == 0 { 1 } else { new_offset as usize };
+        self.pending_read = io::Cursor::new(Vec::new());
+        Ok(self.offset as u64)
+    }
+}
+
 /// Writes LOB data as a forward-only byte stream.
 impl io::Write for Lob {
     /// Flushes this output stream.
@@ -463,7 +509,7 @@ impl io::Write for Lob {
 
         let (data, amount) = if self.is_character_lob() {
             let value = std::str::from_utf8(buf).map_err(|error| {
-                io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+                io::Error::new(io::ErrorKind::InvalidData, error)
             })?;
             let amount = value.encode_utf16().count();
             let data = match self.string_encoding() {
