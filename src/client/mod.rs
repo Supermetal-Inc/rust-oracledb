@@ -62,6 +62,7 @@ use crate::messages::Message;
 use crate::messages::PingMessage;
 use crate::messages::ProtocolMessage;
 use crate::messages::RollbackMessage;
+use crate::ora_type::OracleIntervalDS;
 use crate::packet::Packet;
 use crate::response::Response;
 use crate::row::DbRow;
@@ -102,6 +103,7 @@ pub struct Client {
     last_warning: Option<String>,
     security_context: Option<EndUserSecurityContext>,
     temp_lobs_to_close: Vec<Vec<u8>>,
+    db_timezone_offset: OracleIntervalDS,
 }
 
 pub(crate) type ClientRef = std::sync::Arc<std::sync::Mutex<Client>>;
@@ -149,7 +151,11 @@ impl Client {
         message: &mut impl Message,
     ) -> Result<Response, Error> {
         let mut response = self.perform_round_trip(message)?;
-        if message.resend_needed() {
+        if message.renegotiation_needed() {
+            let mut data_types_message = DataTypesMessage::new();
+            response = self.perform_round_trip(&mut data_types_message)?;
+            message.deserialize(self, &mut response)?;
+        } else if message.resend_needed() {
             response = self.perform_round_trip(message)?;
         }
         Ok(response)
@@ -737,13 +743,26 @@ impl Client {
         }
     }
 
+    /// Returns the database time zone offset.
+    pub(crate) fn db_timezone_offset(
+        &self,
+    ) -> Result<chrono::Duration, Error> {
+        if self.db_timezone_offset.days() != 0 {
+            Err(Error::not_implemented("named database time zone".to_string()))
+        } else {
+            let offset = self.db_timezone_offset;
+            Ok(chrono::Duration::hours(offset.hours().into())
+                + chrono::Duration::minutes(offset.minutes().into()))
+        }
+    }
+
     /// Ends the current request against the database.This clears any end user
     /// security context and warnings, rolls back any open transactions and
     /// releases any session to the DRCP pool, if applicable.
     pub(crate) fn end_request(&mut self) -> Result<(), Error> {
         self.security_context = None;
         self.last_warning = None;
-        self.transport.set_read_timeout(None)?;
+        self.transport.set_timeout(None)?;
         if self.in_request && self.pending_session_state != 0 {
             self.in_request = false;
         }
@@ -940,6 +959,7 @@ impl Client {
             transaction_in_progress: false,
             pool_id,
             temp_lobs_to_close: Vec::new(),
+            db_timezone_offset: OracleIntervalDS::default(),
         }
     }
 
@@ -1013,7 +1033,12 @@ impl Client {
         &self,
         duration: Option<std::time::Duration>,
     ) -> Result<(), Error> {
-        self.transport.set_read_timeout(duration)
+        self.transport.set_timeout(duration)
+    }
+
+    /// Sets the database time zone offset.
+    pub(crate) fn set_db_timezone_offset(&mut self, value: OracleIntervalDS) {
+        self.db_timezone_offset = value;
     }
 
     /// Sets the ids of the character sets in use by the database. The first
