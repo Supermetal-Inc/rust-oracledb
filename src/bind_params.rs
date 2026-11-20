@@ -105,6 +105,7 @@ impl BindParameters<'_> {
                     }
                     for (value, bind_info) in row.iter().zip(binds.iter_mut())
                     {
+                        value.validate()?;
                         bind_info.check_and_set_metadata(
                             first_row,
                             value.db_type(),

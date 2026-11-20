@@ -618,6 +618,10 @@ where
 /// Trait which transforms values used by applications into the format required
 /// by the database.
 pub trait ToDbValue: ToBuf + Send + Sync {
+    /// Checks that the value can be bound before it is sent to the database.
+    fn validate(&self) -> Result<(), Error> {
+        Ok(())
+    }
     fn db_type(&self) -> &'static DbType;
     fn max_size(&self) -> usize {
         0
@@ -666,6 +670,10 @@ impl<T: ToDbValue> TypedValue<T> {
 }
 
 impl<T: ToDbValue> ToDbValue for TypedValue<T> {
+    fn validate(&self) -> Result<(), Error> {
+        self.value.validate()
+    }
+
     fn db_type(&self) -> &'static DbType {
         self.db_type
     }
@@ -826,6 +834,16 @@ impl ToDbValue for OracleNumber {
 }
 
 impl ToDbValue for OracleTimestamp {
+    fn validate(&self) -> Result<(), Error> {
+        if self.year() > 9999 {
+            return Err(Error::out_of_range(format!(
+                "timestamp year {} exceeds 9999",
+                self.year()
+            )));
+        }
+        Ok(())
+    }
+
     fn db_type(&self) -> &'static DbType {
         if self.is_utc() {
             crate::DB_TYPE_TIMESTAMP_TZ
@@ -845,6 +863,13 @@ impl<T> ToDbValue for Option<T>
 where
     T: ToDbValue + Default,
 {
+    fn validate(&self) -> Result<(), Error> {
+        if let Some(value) = self {
+            value.validate()?;
+        }
+        Ok(())
+    }
+
     fn db_type(&self) -> &'static DbType {
         if let Some(value) = self {
             value.db_type()

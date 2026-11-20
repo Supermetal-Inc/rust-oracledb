@@ -267,3 +267,48 @@ fn explicit_date_bind(
     );
     Ok(())
 }
+
+#[rstest]
+/// Reject an out-of-range UTC year when binding a timestamp.
+fn test_1211(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let valid =
+        oracledb::OracleTimestamp::new_utc_timestamp(9999, 1, 1, 13, 0, 1, 1);
+    let row = conn.query_row(
+        "select to_char(:1, 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM') from dual",
+        &[&valid],
+    )?;
+    assert_eq!(row.get::<String>(0)?, "9999-01-01 13:00:01.000000001 +00:00");
+
+    let invalid =
+        oracledb::OracleTimestamp::new_utc_timestamp(10000, 1, 1, 13, 0, 1, 1);
+    let result = conn.query_row("select :1 from dual", &[&invalid]);
+    assert!(result.is_err(), "year 10000 bind should be rejected");
+    Ok(())
+}
+
+#[rstest]
+/// Validate every batch row, including nullable and explicitly typed binds.
+fn test_1212(conn: oracledb::Connection) -> Result<(), oracledb::Error> {
+    let _table = common::create_table(
+        &conn,
+        "TestTimestampYearBounds",
+        "ts timestamp(9)",
+    )?;
+    let valid =
+        Some(oracledb::OracleTimestamp::new_timestamp(9999, 1, 1, 0, 0, 0, 0));
+    let invalid = Some(oracledb::OracleTimestamp::new_timestamp(
+        10000, 1, 1, 0, 0, 0, 0,
+    ));
+    let valid = oracledb::TypedValue::new(valid, oracledb::DB_TYPE_TIMESTAMP)?;
+    let invalid =
+        oracledb::TypedValue::new(invalid, oracledb::DB_TYPE_TIMESTAMP)?;
+    let result = conn.execute_batch(
+        "insert into TestTimestampYearBounds values (:1)",
+        oracledb::BindParameters::Slice(&[&[&valid], &[&invalid]]),
+    );
+    assert!(result.is_err(), "invalid later batch row should be rejected");
+    let row =
+        conn.query_row("select count(*) from TestTimestampYearBounds", &[])?;
+    assert_eq!(row.get::<i64>(0)?, 0, "validation should precede execution");
+    Ok(())
+}
