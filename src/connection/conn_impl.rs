@@ -65,6 +65,12 @@ pub(crate) enum ConnImplStatus {
 }
 
 impl ConnImpl {
+    pub(crate) fn cancellation_handle(
+        &self,
+    ) -> Result<super::CancellationHandle, Error> {
+        self.client_ref.lock()?.cancellation_handle()
+    }
+
     /// Changes the password of the logged on user.
     pub(crate) fn change_password(
         &self,

@@ -605,8 +605,18 @@ impl Client {
         self.security_context = None;
     }
 
+    pub(crate) fn cancellation_handle(
+        &self,
+    ) -> Result<crate::connection::CancellationHandle, Error> {
+        self.transport.cancellation_handle()
+    }
+
     /// Closes the connection to the database.
     pub(crate) fn close(&mut self) -> Result<(), Error> {
+        if self.transport.is_cancelled() {
+            let _ = self.transport.close();
+            return Ok(());
+        }
         self.dbobject_type_cache.clear();
         self.end_request()?;
         self.process_message(&mut LogoffMessage::new())?;
@@ -1005,7 +1015,8 @@ impl Client {
     /// Returns whether the client should be closed based on the pending error
     /// number returned by the latest control packet.
     pub(crate) fn requires_close(&self) -> bool {
-        self.pending_error_num == constants::DB_ERR_NUM_SESSION_SHUTDOWN
+        self.transport.is_cancelled()
+            || self.pending_error_num == constants::DB_ERR_NUM_SESSION_SHUTDOWN
     }
 
     /// Resets the TTC field version back to the default value. The necessity

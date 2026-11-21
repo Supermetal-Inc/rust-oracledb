@@ -317,3 +317,22 @@ fn test_2011() -> Result<(), oracledb::Error> {
     assert_eq!(row.get::<&str>(1)?, test_config.user.to_uppercase());
     Ok(())
 }
+
+#[rstest]
+fn test_cancellation_interrupts_blocked_call(
+    conn: oracledb::Connection,
+) -> Result<(), oracledb::Error> {
+    let handle = conn.cancellation_handle()?;
+    let cancel = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        handle.cancel().unwrap();
+        handle.cancel().unwrap();
+    });
+    let start = Instant::now();
+    let result = conn.execute("begin dbms_session.sleep(60); end;", &[]);
+    cancel.join().unwrap();
+    assert!(result.is_err());
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(conn.ping().is_err());
+    Ok(())
+}

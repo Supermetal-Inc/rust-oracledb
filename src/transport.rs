@@ -45,6 +45,7 @@ use rustls::pki_types::PrivateKeyDer;
 use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
 
+use crate::connection::CancellationHandle;
 use std::cmp::min;
 use std::env;
 use std::fs;
@@ -52,6 +53,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::Address;
 use crate::config::Config;
@@ -160,6 +162,7 @@ impl LowLevelTransport {
 }
 
 pub(crate) struct Transport {
+    cancelled: Arc<AtomicBool>,
     low_level_transport: Option<LowLevelTransport>,
     socket_num: String,
     max_packet_size: usize,
@@ -317,6 +320,27 @@ impl Transport {
         Ok(())
     }
 
+    pub(crate) fn cancellation_handle(
+        &self,
+    ) -> Result<CancellationHandle, Error> {
+        let stream = match self
+            .low_level_transport
+            .as_ref()
+            .ok_or_else(Error::not_connected)?
+        {
+            LowLevelTransport::Tcp(stream) => stream,
+            LowLevelTransport::Tls(stream) => &stream.sock,
+        };
+        Ok(CancellationHandle::new(
+            stream.try_clone()?,
+            Arc::clone(&self.cancelled),
+        ))
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     /// Closes the TCP connection to the database.
     pub(crate) fn close(&mut self) -> Result<(), Error> {
         if self.print_packets {
@@ -378,6 +402,7 @@ impl Transport {
     /// Creates a new empty transport.
     pub(crate) fn new() -> Self {
         Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
             low_level_transport: None,
             socket_num: String::new(),
             max_packet_size: 0,

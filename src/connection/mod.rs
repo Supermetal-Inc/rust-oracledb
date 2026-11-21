@@ -28,13 +28,15 @@
 // Submodule for connections.
 //-----------------------------------------------------------------------------
 
+mod cancellation;
 mod conn_impl;
+pub use cancellation::CancellationHandle;
 
 pub(crate) use conn_impl::ConnImpl;
 pub(crate) use conn_impl::ConnImplStatus;
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::bind_params::BindParameters;
 use crate::config::Config;
@@ -56,6 +58,7 @@ use crate::statement::StatementBuilder;
 /// connection created by calling [connect()](`crate::connect`) or a pooled
 /// connection created by calling [Pool::acquire()](`crate::Pool::acquire`)
 pub struct Connection {
+    cancellation: Mutex<Option<CancellationHandle>>,
     conn_impl: Option<ConnImpl>,
     pool_contents_ref: Option<PoolContentsRef>,
 }
@@ -71,9 +74,22 @@ impl Connection {
         }
     }
 
+    /// Obtains a shutdown-only cancellation handle before starting a blocking call.
+    /// Cancelling permanently disconnects this connection, including when using TLS.
+    pub fn cancellation_handle(&self) -> Result<CancellationHandle, Error> {
+        let mut handle = self.cancellation.lock()?;
+        if handle.is_none() {
+            *handle = Some(self.get_impl()?.cancellation_handle()?);
+        }
+        Ok(handle.as_ref().unwrap().clone())
+    }
+
     /// Closes the connection and makes it unsable now instead of when the
     /// connection is dropped.
     pub fn close(&mut self) -> Result<(), Error> {
+        if let Some(handle) = self.cancellation.lock()?.take() {
+            handle.invalidate()?;
+        }
         if let Some(pool_contents_ref) = self.pool_contents_ref.take() {
             let mut pool_contents = pool_contents_ref.lock()?;
             let conn_impl = self.conn_impl.take().unwrap();
@@ -88,7 +104,11 @@ impl Connection {
     /// Establishes a standalone connection to the database and returns it.
     pub(crate) fn connect(config: Config) -> Result<Connection, Error> {
         let conn_impl = ConnImpl::connect(config, String::new())?;
-        Ok(Connection { conn_impl: Some(conn_impl), pool_contents_ref: None })
+        Ok(Connection {
+            cancellation: Mutex::new(None),
+            conn_impl: Some(conn_impl),
+            pool_contents_ref: None,
+        })
     }
 
     /// Creates a connection from a pooled connection.
@@ -97,6 +117,7 @@ impl Connection {
         pool_contents_ref: &PoolContentsRef,
     ) -> Connection {
         Connection {
+            cancellation: Mutex::new(None),
             conn_impl: Some(conn_impl),
             pool_contents_ref: Some(pool_contents_ref.clone()),
         }

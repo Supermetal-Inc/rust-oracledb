@@ -255,3 +255,38 @@ fn initial_minimum_and_increment_create_all_scheduled_connections()
     pool.close()?;
     Ok(())
 }
+
+#[test]
+fn test_cancellation_discards_pooled_connection() -> Result<(), oracledb::Error>
+{
+    let pool = oracledb::create_pool(pool_config(0, 1, 1)?)?;
+    let connection = pool.acquire()?;
+    let identity = (connection.session_id()?, connection.serial_num()?);
+    connection.cancellation_handle()?.cancel()?;
+    drop(connection);
+    let replacement = pool.acquire()?;
+    replacement.ping()?;
+    assert_ne!(
+        identity,
+        (replacement.session_id()?, replacement.serial_num()?)
+    );
+    Ok(())
+}
+
+#[test]
+fn test_cancellation_handle_expires_on_pool_return()
+-> Result<(), oracledb::Error> {
+    let pool = oracledb::create_pool(pool_config(0, 1, 1)?)?;
+    let connection = pool.acquire()?;
+    let identity = (connection.session_id()?, connection.serial_num()?);
+    let handle = connection.cancellation_handle()?;
+    drop(connection);
+    let next_borrower = pool.acquire()?;
+    assert_eq!(
+        identity,
+        (next_borrower.session_id()?, next_borrower.serial_num()?)
+    );
+    handle.cancel()?;
+    next_borrower.ping()?;
+    Ok(())
+}

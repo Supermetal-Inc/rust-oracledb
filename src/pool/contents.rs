@@ -294,6 +294,10 @@ impl PoolContents {
         let result = conn_impl.set_returned_to_pool();
         self.num_busy -= 1;
         if result.is_err()
+            || matches!(
+                conn_impl.get_status(None),
+                ConnImplStatus::RequiresClose
+            )
             || conn_impl.lifetime_exceeded(self.config.max_lifetime())
         {
             self.connections_requiring_drop.push(conn_impl);

@@ -79,7 +79,7 @@ mod write_buffer;
 pub use crate::arrow::ArrowBatchReader;
 pub use crate::config::Config;
 pub use crate::config::PoolConfig;
-pub use crate::connection::Connection;
+pub use crate::connection::{CancellationHandle, Connection};
 pub use crate::cursor::Cursor;
 pub use crate::db_type::DbType;
 pub use crate::dbobject::DbCollection;
