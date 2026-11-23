@@ -48,6 +48,9 @@ const TTC_OBJ_ATOMIC_NULL: u8 = 253;
 const TTC_OBJ_IS_DEGENERATE: u8 = 0x10;
 const TTC_OBJ_NO_PREFIX_SEG: u8 = 0x04;
 const TTC_OBJ_PLSQL_INDEX_TABLE: u8 = 1;
+const TTC_XML_LOB: u32 = 0x0001;
+const TTC_XML_STRING: u32 = 0x0004;
+const TTC_XML_SKIP_NEXT_4: u32 = 0x0010_0000;
 
 #[derive(Debug)]
 /// A fetched database collection.
@@ -143,6 +146,15 @@ impl PendingDbObject {
         }
     }
 
+    /// Decodes XML using the same object envelope and LOB reader.
+    pub(crate) fn try_into_xml(
+        self,
+        client: &Client,
+        client_ref: &ClientRef,
+    ) -> Result<DbValue, Error> {
+        DbObjectReadBuffer::new(&self.bytes, client, client_ref).decode_xml()
+    }
+
     /// Attempt to decode a database object and return it upon success.
     pub(crate) fn try_into_db_value(
         self,
@@ -236,6 +248,12 @@ impl DbObjectReadBuffer<'_> {
         &mut self,
         object_type: &Arc<DbObjectType>,
     ) -> Result<DbObjectOrCollection, Error> {
+        self.read_header()?;
+        self.decode_body(object_type)
+    }
+
+    /// Reads the header shared by object and XML images.
+    fn read_header(&mut self) -> Result<(), Error> {
         let flags = self.buf.read_u8()?;
         let _image_version = self.buf.read_u8()?;
         let _image_size = self.read_length()?;
@@ -248,7 +266,35 @@ impl DbObjectReadBuffer<'_> {
             let length = self.read_length()?;
             let _prefix_seg = self.buf.read_bytes(length)?;
         }
-        self.decode_body(object_type)
+        Ok(())
+    }
+
+    /// XML payloads contain either character data or a CLOB locator.
+    fn decode_xml(&mut self) -> Result<DbValue, Error> {
+        self.read_header()?;
+        let _xml_version = self.buf.read_u8()?;
+        let flags = self.buf.read_u32be()?;
+        if flags & TTC_XML_SKIP_NEXT_4 != 0 {
+            self.buf.read_bytes(4)?;
+        }
+        let bytes = self.buf.read_remaining_bytes();
+        if flags & TTC_XML_STRING != 0 {
+            Ok(DbValue::String(decode_character_data(
+                self.client,
+                bytes,
+                constants::CS_FORM_IMPLICIT,
+            )?))
+        } else if flags & TTC_XML_LOB != 0 {
+            Ok(DbValue::Lob(Lob::new(
+                self.client_ref.clone(),
+                PendingLobData::from_locator(
+                    crate::DB_TYPE_CLOB,
+                    bytes.to_vec(),
+                ),
+            )))
+        } else {
+            Err(Error::not_implemented(format!("XML image flags {flags:#x}")))
+        }
     }
 
     /// Decodes a single value from the image.
@@ -304,27 +350,12 @@ impl DbObjectReadBuffer<'_> {
             | crate::DB_TYPE_VARCHAR
             | crate::DB_TYPE_NCHAR
             | crate::DB_TYPE_NVARCHAR => {
-                let charset = {
-                    if typ.csfrm == constants::CS_FORM_NCHAR {
-                        client.get_ncharset_id()
-                    } else {
-                        client.get_charset_id()
-                    }
-                };
-                let value = match charset {
-                    crate::constants::CHARSET_ID_UTF8 => {
-                        String::from_utf8(bytes.to_vec())?
-                    }
-                    crate::constants::CHARSET_ID_UTF16 => {
-                        crate::utils::utf16be_bytes_to_string(bytes)?
-                    }
-                    _ => {
-                        return Err(Error::not_implemented(format!(
-                            "object character set {charset}"
-                        )));
-                    }
-                };
+                let value = decode_character_data(client, bytes, typ.csfrm)?;
                 DbValue::String(value)
+            }
+            crate::DB_TYPE_XMLTYPE => {
+                DbObjectReadBuffer::new(bytes, client, client_ref)
+                    .decode_xml()?
             }
             crate::DB_TYPE_RAW => DbValue::Bytes(bytes.to_vec()),
             crate::DB_TYPE_NUMBER => {
@@ -445,4 +476,25 @@ fn validate_scalar_length(
         return Err(Error::unexpected_result());
     }
     Ok(())
+}
+
+fn decode_character_data(
+    client: &Client,
+    bytes: &[u8],
+    csfrm: u8,
+) -> Result<String, Error> {
+    let charset = if csfrm == constants::CS_FORM_NCHAR {
+        client.get_ncharset_id()
+    } else {
+        client.get_charset_id()
+    };
+    match charset {
+        constants::CHARSET_ID_UTF8 => Ok(String::from_utf8(bytes.to_vec())?),
+        constants::CHARSET_ID_UTF16 => {
+            crate::utils::utf16be_bytes_to_string(bytes)
+        }
+        _ => Err(Error::not_implemented(format!(
+            "object character set {charset}"
+        ))),
+    }
 }

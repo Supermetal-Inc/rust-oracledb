@@ -73,6 +73,7 @@ mod transport;
 mod utils;
 mod vector;
 mod write_buffer;
+mod xml;
 
 // public structs
 #[cfg(feature = "arrow")]
@@ -99,6 +100,7 @@ pub use crate::row::Row;
 pub use crate::statement::Statement;
 pub use crate::statement::StatementBuilder;
 pub use crate::vector::SparseVector;
+pub use crate::xml::Xml;
 
 // public enums
 pub use crate::bind_params::BindParameters;

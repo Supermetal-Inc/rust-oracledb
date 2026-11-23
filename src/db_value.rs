@@ -105,6 +105,9 @@ impl PendingDbValue {
     ) -> Result<DbValue, Error> {
         match self {
             Self::DbObject(pending_obj) => {
+                if metadata.db_type() == crate::DB_TYPE_XMLTYPE {
+                    return pending_obj.try_into_xml(client, client_ref);
+                }
                 if let Some(object_type) = metadata.object_type()? {
                     pending_obj.try_into_db_value(
                         &object_type,
